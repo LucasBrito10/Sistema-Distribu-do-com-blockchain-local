@@ -1,0 +1,160 @@
+# Como usar (em cada máquina):
+#
+#   export SETOR_NOME=SETOR_NORTE
+#   export CLUSTER_IPS=192.168.1.10,192.168.1.11,192.168.1.12,192.168.1.13
+#   export PUBLIC_ADDRESS=192.168.1.10   # IP físico DESTA máquina
+#   docker compose up -d --build
+#
+# SETOR_NOME    : identificador único do setor desta máquina (SETOR_NORTE, SETOR_SUL, etc.)
+# CLUSTER_IPS   : IPs físicos de TODAS as máquinas do cluster (incluindo esta)
+# PUBLIC_ADDRESS: IP físico desta máquina — usado pelo Hazelcast para se anunciar
+#                 aos outros membros através da rede física (sem isso o Hazelcast
+#                 anuncia o IP interno da bridge Docker, que outras máquinas não alcançam)
+#
+# CORREÇÃO MULTIMÁQUINA — Afinidade setor → broker:
+#   Os clientes (sensores/drones) usam o hostname Docker local "broker" como
+#   PRIMEIRO elemento de BROKER_IP. Assim eles acessam o broker da própria
+#   máquina pela bridge interna do Compose, sem depender de hairpin/NAT usando
+#   o IP físico da máquina. Os IPs físicos do cluster permanecem como fallback
+#   para failover entre máquinas.
+
+x-build-templates:
+  broker-build: &broker-build
+    context: .
+    dockerfile: ormuz-broker/Dockerfile
+  clients-build: &clients-build
+    context: .
+    dockerfile: ormuz-clients/Dockerfile
+
+services:
+  # =========================================================================
+  # BROKER LOCAL DA MÁQUINA
+  # =========================================================================
+  broker:
+    image: lucasbrito007/ormuz-broker:latest
+    build: *broker-build
+    container_name: "broker-${SETOR_NOME:?defina SETOR_NOME}"
+    environment:
+      PORT: "8080"
+      CLUSTER_IPS: "${CLUSTER_IPS:?defina CLUSTER_IPS com os IPs físicos de todos os brokers}"
+      # IP físico desta máquina — necessário para o Hazelcast se anunciar
+      # corretamente aos brokers das outras máquinas pela rede física
+      PUBLIC_ADDRESS: "${PUBLIC_ADDRESS:?defina PUBLIC_ADDRESS com o IP físico desta máquina}"
+      # Ledger persistente fora do filesystem efêmero do container.
+      LEDGER_FILE: "/data/ledger.log"
+      BLOCKCHAIN_FILE: "/data/blockchain.jsonl"
+    volumes:
+      - ./data/${SETOR_NOME:?defina SETOR_NOME}/broker-ledger:/data
+    ports:
+      - "8080:8080"   # Socket TCP dos clientes
+      - "5701:5701"   # Hazelcast cluster inter-broker
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    networks:
+      - ormuz-net
+
+  # =========================================================================
+  # FÁBRICAS LOCAIS DA MÁQUINA
+  # =========================================================================
+  sensores:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: "sensores-${SETOR_NOME:?defina SETOR_NOME}"
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppSensores"
+      # broker primeiro: conexão local pela rede interna do Compose.
+      # CLUSTER_IPS em seguida: failover para brokers nas demais máquinas.
+      BROKER_IP: "broker,${CLUSTER_IPS:?defina CLUSTER_IPS com os IPs físicos de todos os brokers}"
+      BROKER_PORT: "8080"
+      SECTOR: "${SETOR_NOME:?defina SETOR_NOME}"
+    depends_on:
+      - broker
+    restart: on-failure
+    networks:
+      - ormuz-net
+
+  drones:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: "drones-${SETOR_NOME:?defina SETOR_NOME}"
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppFrotaDrones"
+      # broker primeiro: conexão local pela rede interna do Compose.
+      # CLUSTER_IPS em seguida: failover para brokers nas demais máquinas.
+      BROKER_IP: "broker,${CLUSTER_IPS:?defina CLUSTER_IPS com os IPs físicos de todos os brokers}"
+      BROKER_PORT: "8080"
+      SECTOR: "${SETOR_NOME:?defina SETOR_NOME}"
+    depends_on:
+      - broker
+    restart: on-failure
+    networks:
+      - ormuz-net
+
+  # =========================================================================
+  # FERRAMENTAS ADMINISTRATIVAS (Opcionais)
+  # Ativar com: docker compose --profile admin up -d
+  # =========================================================================
+  monitor-central:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: monitor-central
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppMonitor"
+      # Monitor conecta ao broker local e usa os demais como fallback
+      BROKER_IP: "broker,${CLUSTER_IPS:?defina CLUSTER_IPS com os IPs físicos de todos os brokers}"
+      BROKER_PORT: "8080"
+      SECTOR: "ADMIN"
+    profiles:
+      - admin
+    depends_on:
+      - broker
+    restart: on-failure
+    stdin_open: true
+    tty: true
+    networks:
+      - ormuz-net
+
+  teste-carga:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: teste-carga
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppLoadTest"
+      BROKER_IP: "broker,${CLUSTER_IPS:?defina CLUSTER_IPS com os IPs físicos de todos os brokers}"
+      BROKER_PORT: "8080"
+      SECTOR: "TESTE"
+    profiles:
+      - admin
+    depends_on:
+      - broker
+    networks:
+      - ormuz-net
+
+  teste-barema:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: "teste-barema-${SETOR_NOME:?defina SETOR_NOME}"
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppBaremaAuditTest"
+      BROKER_IP: "broker,${CLUSTER_IPS:?defina CLUSTER_IPS com os IPs físicos de todos os brokers}"
+      BROKER_PORT: "8080"
+      SECTOR: "${SETOR_NOME:?defina SETOR_NOME}"
+      TEST_SECTORS: "${TEST_SECTORS:-SETOR_NORTE,SETOR_SUL,SETOR_LESTE,SETOR_OESTE}"
+      TEST_DRONES_PER_SECTOR: "${TEST_DRONES_PER_SECTOR:-3}"
+      TEST_REQUESTS: "${TEST_REQUESTS:-8}"
+      TEST_CREDIT_AMOUNT: "${TEST_CREDIT_AMOUNT:-5}"
+      TEST_WAIT_SECONDS: "${TEST_WAIT_SECONDS:-55}"
+      TEST_DOUBLE_SPEND: "${TEST_DOUBLE_SPEND:-true}"
+    profiles:
+      - admin
+    depends_on:
+      - broker
+      - drones
+    networks:
+      - ormuz-net
+
+
+networks:
+  ormuz-net:
+    driver: bridge

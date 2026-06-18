@@ -1,0 +1,320 @@
+# Compose para teste local — simula 4 máquinas em um único PC.
+# Uso: docker compose -f docker-compose.dev.yaml up -d --build
+#
+# Para subir o monitor interativo:
+#   docker compose -f docker-compose.dev.yaml --profile admin up -d
+#   docker attach monitor-central
+#
+# AFINIDADE SETOR → BROKER:
+#   Cada fábrica (sensores/drones) lista SEU broker local como PRIMEIRO elemento
+#   de BROKER_IP. O MiddlewareClient sempre tenta o índice 0 primeiro, garantindo
+#   que os recursos do setor X se conectem ao broker X. Os demais brokers ficam
+#   como fallover de failover.
+#
+#   depends_on enxuto: cada cliente depende apenas do seu broker local.
+#   Os demais brokers do cluster sobem em paralelo sem bloquear os clientes.
+
+x-build-templates:
+  broker-build: &broker-build
+    context: .
+    dockerfile: ormuz-broker/Dockerfile
+  clients-build: &clients-build
+    context: .
+    dockerfile: ormuz-clients/Dockerfile
+
+services:
+  # =========================================================================
+  # CLUSTER DE BROKERS (4 "máquinas" simuladas)
+  # =========================================================================
+  broker-norte:
+    image: lucasbrito007/ormuz-broker:latest
+    build: *broker-build
+    container_name: broker-norte
+    environment:
+      PORT: "8080"
+      CLUSTER_IPS: "broker-norte,broker-sul,broker-leste,broker-oeste"
+      # Em teste local todos os brokers estão na mesma bridge,
+      # então PUBLIC_ADDRESS não é necessário — deixamos vazio.
+      PUBLIC_ADDRESS: ""
+      LEDGER_FILE: "/data/ledger.log"
+      BLOCKCHAIN_FILE: "/data/blockchain.jsonl"
+    volumes:
+      - ./data/dev/broker-norte:/data
+    ports:
+      - "8080:8080"
+      - "5701:5701"
+    stdin_open: true
+    tty: true
+    networks:
+      - ormuz-net
+
+  broker-sul:
+    image: lucasbrito007/ormuz-broker:latest
+    build: *broker-build
+    container_name: broker-sul
+    environment:
+      PORT: "8080"
+      CLUSTER_IPS: "broker-norte,broker-sul,broker-leste,broker-oeste"
+      PUBLIC_ADDRESS: ""
+      LEDGER_FILE: "/data/ledger.log"
+      BLOCKCHAIN_FILE: "/data/blockchain.jsonl"
+    volumes:
+      - ./data/dev/broker-sul:/data
+    ports:
+      - "8081:8080"
+      - "5702:5701"
+    stdin_open: true
+    tty: true
+    networks:
+      - ormuz-net
+
+  broker-leste:
+    image: lucasbrito007/ormuz-broker:latest
+    build: *broker-build
+    container_name: broker-leste
+    environment:
+      PORT: "8080"
+      CLUSTER_IPS: "broker-norte,broker-sul,broker-leste,broker-oeste"
+      PUBLIC_ADDRESS: ""
+      LEDGER_FILE: "/data/ledger.log"
+      BLOCKCHAIN_FILE: "/data/blockchain.jsonl"
+    volumes:
+      - ./data/dev/broker-leste:/data
+    ports:
+      - "8082:8080"
+      - "5703:5701"
+    stdin_open: true
+    tty: true
+    networks:
+      - ormuz-net
+
+  broker-oeste:
+    image: lucasbrito007/ormuz-broker:latest
+    build: *broker-build
+    container_name: broker-oeste
+    environment:
+      PORT: "8080"
+      CLUSTER_IPS: "broker-norte,broker-sul,broker-leste,broker-oeste"
+      PUBLIC_ADDRESS: ""
+      LEDGER_FILE: "/data/ledger.log"
+      BLOCKCHAIN_FILE: "/data/blockchain.jsonl"
+    volumes:
+      - ./data/dev/broker-oeste:/data
+    ports:
+      - "8083:8080"
+      - "5704:5701"
+    stdin_open: true
+    tty: true
+    networks:
+      - ormuz-net
+
+  # =========================================================================
+  # SETOR NORTE — conecta a broker-norte (posição 0 = broker preferencial)
+  # =========================================================================
+  sensores-norte:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: sensores-norte
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppSensores"
+      BROKER_IP: "broker-norte,broker-sul,broker-leste,broker-oeste"
+      BROKER_PORT: "8080"
+      SECTOR: "SETOR_NORTE"
+    depends_on:
+      - broker-norte
+    restart: on-failure
+    networks:
+      - ormuz-net
+
+  drones-norte:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: drones-norte
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppFrotaDrones"
+      BROKER_IP: "broker-norte,broker-sul,broker-leste,broker-oeste"
+      BROKER_PORT: "8080"
+      SECTOR: "SETOR_NORTE"
+    depends_on:
+      - broker-norte
+    restart: on-failure
+    networks:
+      - ormuz-net
+
+  # =========================================================================
+  # SETOR SUL — conecta a broker-sul (posição 0 = broker preferencial)
+  # =========================================================================
+  sensores-sul:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: sensores-sul
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppSensores"
+      BROKER_IP: "broker-sul,broker-norte,broker-leste,broker-oeste"
+      BROKER_PORT: "8080"
+      SECTOR: "SETOR_SUL"
+    depends_on:
+      - broker-sul
+    restart: on-failure
+    networks:
+      - ormuz-net
+
+  drones-sul:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: drones-sul
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppFrotaDrones"
+      BROKER_IP: "broker-sul,broker-norte,broker-leste,broker-oeste"
+      BROKER_PORT: "8080"
+      SECTOR: "SETOR_SUL"
+    depends_on:
+      - broker-sul
+    restart: on-failure
+    networks:
+      - ormuz-net
+
+  # =========================================================================
+  # SETOR LESTE — conecta a broker-leste (posição 0 = broker preferencial)
+  # =========================================================================
+  sensores-leste:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: sensores-leste
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppSensores"
+      BROKER_IP: "broker-leste,broker-norte,broker-sul,broker-oeste"
+      BROKER_PORT: "8080"
+      SECTOR: "SETOR_LESTE"
+    depends_on:
+      - broker-leste
+    restart: on-failure
+    networks:
+      - ormuz-net
+
+  drones-leste:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: drones-leste
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppFrotaDrones"
+      BROKER_IP: "broker-leste,broker-norte,broker-sul,broker-oeste"
+      BROKER_PORT: "8080"
+      SECTOR: "SETOR_LESTE"
+    depends_on:
+      - broker-leste
+    restart: on-failure
+    networks:
+      - ormuz-net
+
+  # =========================================================================
+  # SETOR OESTE — conecta a broker-oeste (posição 0 = broker preferencial)
+  # =========================================================================
+  sensores-oeste:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: sensores-oeste
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppSensores"
+      BROKER_IP: "broker-oeste,broker-norte,broker-sul,broker-leste"
+      BROKER_PORT: "8080"
+      SECTOR: "SETOR_OESTE"
+    depends_on:
+      - broker-oeste
+    restart: on-failure
+    networks:
+      - ormuz-net
+
+  drones-oeste:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: drones-oeste
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppFrotaDrones"
+      BROKER_IP: "broker-oeste,broker-norte,broker-sul,broker-leste"
+      BROKER_PORT: "8080"
+      SECTOR: "SETOR_OESTE"
+    depends_on:
+      - broker-oeste
+    restart: on-failure
+    networks:
+      - ormuz-net
+
+  # =========================================================================
+  # FERRAMENTAS ADMINISTRATIVAS
+  # =========================================================================
+  monitor-central:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: monitor-central
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppMonitor"
+      # Monitor não tem setor fixo: lista todos os brokers sem preferência
+      BROKER_IP: "broker-norte,broker-sul,broker-leste,broker-oeste"
+      BROKER_PORT: "8080"
+      SECTOR: "ADMIN"
+    profiles:
+      - admin
+    depends_on:
+      - broker-norte
+      - broker-sul
+      - broker-leste
+      - broker-oeste
+    restart: on-failure
+    stdin_open: true
+    tty: true
+    networks:
+      - ormuz-net
+
+  teste-carga:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: teste-carga
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppLoadTest"
+      BROKER_IP: "broker-norte,broker-sul,broker-leste,broker-oeste"
+      BROKER_PORT: "8080"
+      SECTOR: "TESTE"
+    profiles:
+      - admin
+    depends_on:
+      - broker-norte
+      - broker-sul
+      - broker-leste
+      - broker-oeste
+    networks:
+      - ormuz-net
+
+  teste-barema:
+    image: lucasbrito007/ormuz-clients:latest
+    build: *clients-build
+    container_name: teste-barema
+    environment:
+      APP_CLASS: "com.ormuz.client.app.AppBaremaAuditTest"
+      BROKER_IP: "broker-norte,broker-sul,broker-leste,broker-oeste"
+      BROKER_PORT: "8080"
+      SECTOR: "SETOR_NORTE"
+      TEST_SECTORS: "SETOR_NORTE,SETOR_SUL,SETOR_LESTE,SETOR_OESTE"
+      TEST_DRONES_PER_SECTOR: "3"
+      TEST_REQUESTS: "8"
+      TEST_CREDIT_AMOUNT: "5"
+      TEST_WAIT_SECONDS: "55"
+      TEST_DOUBLE_SPEND: "true"
+    profiles:
+      - admin
+    depends_on:
+      - broker-norte
+      - broker-sul
+      - broker-leste
+      - broker-oeste
+      - drones-norte
+      - drones-sul
+      - drones-leste
+      - drones-oeste
+    networks:
+      - ormuz-net
+
+
+networks:
+  ormuz-net:
+    driver: bridge
